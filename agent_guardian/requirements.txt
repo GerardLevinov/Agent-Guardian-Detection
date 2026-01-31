@@ -1,0 +1,4 @@
+litellm==1.81.5
+ollama==0.6.1
+PyYAML==6.0.3
+Requests==2.32.5

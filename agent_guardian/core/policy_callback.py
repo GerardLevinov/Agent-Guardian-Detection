@@ -1,7 +1,4 @@
-"""
-Enhanced Policy Enforcement Callback for LiteLLM
-Refactored version using modular components
-"""
+
 
 import logging
 import re
@@ -18,6 +15,7 @@ import yaml
 from ..config import EnforcementConfig
 from ..storage import SQLiteLogger, PolicyAuditLogger
 from ..utils import PathResolver
+from ..utils.policy_discovery import PolicyDiscovery, merge_mappings, merge_folders
 from .workflow_validator import validate_workflow
 from .semantic_validator import get_semantic_validator
 
@@ -48,72 +46,93 @@ def error_print(message: str):
     print(f"[ERROR] {message}", flush=True)
 
 
-# Agent role mapping - can be extended by users
-AGENT_ROLE_MAPPINGS = {
-    # Enhanced Knowledge Assistant Agents
-    "Senior Data Analyst": "Senior_Data_Analyst",
-    "Senior Data Researcher": "Senior_Data_Researcher",
-    "Research Agent": "Senior_Data_Researcher",
-    "Research Data Archivist and File System Manager": "Research_Data_Archivist_and_File_System_Manager",
-    "Research Communications Specialist": "Research_Communications_Specialist",
-    
-    # Trip Planner Agents
-    "City Selection Expert": "City_Selection_Expert",
-    "Local Expert and Travel Guide": "Local_Expert_and_Travel_Guide",
-    "Amazing Travel Concierge": "Amazing_Travel_Concierge",
-
-    # IT Support Agents
-    "IT Support Diagnostic Specialist": "IT_Support_Diagnostic_Specialist",
-    "IT Alert and Ticketing Coordinator": "IT_Alert_and_Ticketing_Coordinator",
-
-    # AgentDojo Slack
-    "AI Assistant": "AI_Assistant"
-}
-
-# Policy folder names - can be extended by users
-POLICY_FOLDERS = [
-    "policies_knowledge_enhanced",
-    "policies_knowledge_basic",
-    "policies_trip_planner", 
-    "policies_it_assistant",
-    "policies_slack"
-]
-
-
 class SimplePolicyCallback(CustomLogger):
-    """
-    Enhanced policy enforcement callback that works across multiple applications.
-    Refactored to use modular components and configuration.
-    """
+   
     
     def __init__(
         self, 
         config: EnforcementConfig,
         agent_role_mappings: Optional[Dict[str, str]] = None,
-        policy_folders: Optional[List[str]] = None
+        policy_folders: Optional[List[str]] = None,
+        enable_auto_discovery: bool = True
     ):
         """
-        Initialize policy callback with configuration.
+        Initialize policy callback with auto-discovery.
         
         Args:
             config: EnforcementConfig instance
-            agent_role_mappings: Optional custom agent role mappings (extends defaults)
-            policy_folders: Optional custom policy folder names (extends defaults)
+            agent_role_mappings: Optional custom agent role mappings (extends auto-discovered)
+            policy_folders: Optional custom policy folder names (extends auto-discovered)
+            enable_auto_discovery: Enable automatic discovery (default: True)
+        
+        Discovery priority:
+            1. Auto-discovered mappings/folders (base layer)
+            2. User-provided custom mappings/folders (override layer)
+        
+        Example (zero config):
+            callback = SimplePolicyCallback(config)
+        
+        Example (with custom overrides):
+            callback = SimplePolicyCallback(
+                config,
+                agent_role_mappings={"Special Agent": "Custom_Folder"},
+                policy_folders=["legacy_policies"]
+            )
         """
         super().__init__()
         
         self.config = config
         
-        # Merge custom mappings with defaults
-        self.agent_role_mappings = AGENT_ROLE_MAPPINGS.copy()
-        if agent_role_mappings:
-            self.agent_role_mappings.update(agent_role_mappings)
+        # ========================================================================
+        # AUTO-DISCOVERY SYSTEM
+        # ========================================================================
         
-        # Merge custom policy folders with defaults
-        self.policy_folders = POLICY_FOLDERS.copy()
-        if policy_folders:
-            self.policy_folders.extend(policy_folders)
+        if enable_auto_discovery:
+            info_print("🔍 Starting policy structure auto-discovery...", force=True)
+            
+            try:
+                # Initialize discovery system
+                discovery = PolicyDiscovery(config.policy_dir)
+                
+                # Discover structure
+                discovered_mappings, discovered_folders = discovery.discover_all()
+                
+                info_print(f"✅ Auto-discovery complete:", force=True)
+                info_print(f"   - Found {len(discovered_folders)} policy folders", force=True)
+                info_print(f"   - Generated {len(discovered_mappings)} agent role mappings", force=True)
+                
+                # Merge with user-provided custom data (custom takes priority)
+                self.agent_role_mappings = merge_mappings(discovered_mappings, agent_role_mappings)
+                self.policy_folders = merge_folders(discovered_folders, policy_folders)
+                
+                if agent_role_mappings:
+                    info_print(f"   - Added {len(agent_role_mappings)} custom role mappings", force=True)
+                if policy_folders:
+                    info_print(f"   - Added {len(policy_folders)} custom policy folders", force=True)
+                
+            except Exception as e:
+                error_print(f"Auto-discovery failed: {e}")
+                warning_print("Falling back to user-provided mappings only")
+                
+                # Fallback to user-provided only
+                self.agent_role_mappings = agent_role_mappings or {}
+                self.policy_folders = policy_folders or []
+        else:
+            # Auto-discovery disabled - use only user-provided
+            info_print("⚠️  Auto-discovery disabled - using only user-provided mappings")
+            self.agent_role_mappings = agent_role_mappings or {}
+            self.policy_folders = policy_folders or []
         
+        # Log final configuration
+        info_print(f"📋 Final configuration:", force=True)
+        info_print(f"   - {len(self.agent_role_mappings)} agent role mappings", force=True)
+        info_print(f"   - {len(self.policy_folders)} policy folders", force=True)
+        if ENABLE_DEBUG_PRINTS:
+            debug_print(f"   - Policy folders: {self.policy_folders}")
+            debug_print(f"   - Agent mappings: {list(self.agent_role_mappings.keys())[:25]}...")
+        
+        # ========================================================================
+        #         
         # Generate unique instance ID
         self.instance_id = f"callback_{id(self)}"
         
@@ -147,10 +166,13 @@ class SimplePolicyCallback(CustomLogger):
                 warning_print(f"Semantic validation disabled due to error: {e}")
                 config.enable_semantic_validation = False
         
-        info_print(f"Policy callback initialized: {self.instance_id}")
+        info_print(f"Policy callback initialized: {self.instance_id}", force=True)
 
     def _extract_agent_role(self, messages: List[Dict[str, Any]]) -> Optional[str]:
-        """Extract agent role from system message and normalize using mappings."""
+        """
+        Extract agent role from system message and normalize using mappings.
+        
+        """
         full_extracted_role = None
         for message in messages:
             content = message.get('content', '')
@@ -174,9 +196,9 @@ class SimplePolicyCallback(CustomLogger):
                     debug_print(f"Mapped role '{full_extracted_role}' -> '{folder_name}'")
                     return folder_name
             
-            # If no mapping found, return as-is (for extensibility)
-            debug_print(f"No mapping found for role '{full_extracted_role}', using as-is")
-            return full_extracted_role
+            normalized_role = full_extracted_role.replace(' ', '_')
+            debug_print(f"No mapping found for role '{full_extracted_role}', using auto-normalized: '{normalized_role}'")
+            return normalized_role
         
         return None
 
@@ -201,18 +223,18 @@ class SimplePolicyCallback(CustomLogger):
         )
         
         if policy_file:
-            print(f"✅ FOUND POLICY FILE: {policy_file}\n")
+            print(f"FOUND POLICY FILE: {policy_file}\n")
             try:
-                with open(policy_file, 'r') as f:
+                with open(policy_file, 'r', encoding='utf-8') as f:
                     policy_data = yaml.safe_load(f)
                     print(f"✅ Successfully loaded policy from: {policy_file}\n")
                     return policy_data
             except Exception as e:
-                print(f"❌ ERROR loading policy file: {e}\n")
+                print(f"ERROR loading policy file: {e}\n")
                 error_print(f"Failed to load policy from {policy_file}: {e}")
                 return None
         else:
-            print(f"❌ NO POLICY FILE FOUND")
+            print(f"NO POLICY FILE FOUND")
             print(f"   Searched in:")
             for folder in self.policy_folders:
                 search_path = self.config.policy_dir / folder / agent_role_for_folder
@@ -491,9 +513,9 @@ class SimplePolicyCallback(CustomLogger):
                         
                         if result['is_violation']:
                             violations.append(f"Semantic violation ({field_name}): {result['reasoning']}")
-                            warning_print(f"⚠️ Semantic violation detected for {field_name}")
+                            warning_print(f"Semantic violation detected for {field_name}")
                         else:
-                            info_print(f"✅ Semantic validation passed for {field_name}")
+                            info_print(f"Semantic validation passed for {field_name}")
                     except Exception as e:
                         error_print(f"Error during semantic validation: {e}")
                         violations.append(f"Semantic validation system error: {e}")
@@ -534,9 +556,9 @@ class SimplePolicyCallback(CustomLogger):
                     
                     if not is_valid:
                         violations.append(f"Workflow sequence violation: {error_msg}")
-                        warning_print(f"⚠️ Workflow Graph FAILED for {agent_role} -> {action_name}")
+                        warning_print(f"Workflow Graph FAILED for {agent_role} -> {action_name}")
                     else:
-                        info_print(f"✅ Workflow Graph PASSED for {agent_role} -> {action_name}")
+                        info_print(f"Workflow Graph PASSED for {agent_role} -> {action_name}")
                 else:
                     info_print(f"No control flow graph found for {agent_role}, skipping workflow validation")
                     
@@ -746,11 +768,11 @@ class SimplePolicyCallback(CustomLogger):
                     self.audit_logger.log_policy_audit(audit_data)
                 
                 if violations:
-                    print(f"\n🚨 POLICY VIOLATIONS DETECTED:", flush=True)
+                    print(f"\n!! POLICY VIOLATIONS DETECTED!!:", flush=True)
                     for violation in violations:
-                        print(f"   ❌ {violation}", flush=True)
+                        print(f" {violation}", flush=True)
                 else:
-                    info_print("✅ NO VIOLATIONS DETECTED", force=True)
+                    info_print("NO VIOLATIONS DETECTED", force=True)
                 
             except Exception as e:
                 error_print(f"Error in violation checking: {e}")
@@ -767,12 +789,21 @@ class SimplePolicyCallback(CustomLogger):
                 debug_print(f"Appended to in-memory history for {session_id}: {action_name}")
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get statistics about policy enforcement."""
+        """
+        Get statistics about policy enforcement.
+        
+        🔍 NEW: Includes auto-discovery information.
+        """
         stats = {
             "callback_instance_id": self.instance_id,
             "logging_enabled": self.config.enable_audit_logging,
             "semantic_validation_enabled": self.config.enable_semantic_validation,
-            "workflow_validation_enabled": self.config.enable_workflow_validation
+            "workflow_validation_enabled": self.config.enable_workflow_validation,
+            "auto_discovery_info": {
+                "agent_role_mappings_count": len(self.agent_role_mappings),
+                "policy_folders_count": len(self.policy_folders),
+                "discovered_policy_folders": self.policy_folders
+            }
         }
         
         if self.sqlite_logger:
@@ -804,19 +835,43 @@ class SimplePolicyCallback(CustomLogger):
                 self.session_history = {}
                 debug_print("Cleared all in-memory history as a fallback.")
 
+   # FIXED VERSION - Find and replace the clear_execution_history method in your policy_callback.py
+
     def clear_execution_history(self):
-        """Clear execution history for the current session without resetting session ID."""
+        """
+        Clear execution history for the current session without resetting session ID.
+        
+        CRITICAL FIX: Now clears BOTH in-memory cache AND database history to prevent
+        cross-contamination between batch processing runs.
+        """
         if hasattr(self, '_persistent_session_id'):
             session_id = self._persistent_session_id
             
+            # Clear in-memory cache
             with self.session_history_lock:
                 if session_id in self.session_history:
                     action_count = len(self.session_history[session_id])
                     self.session_history[session_id] = []
-                    info_print(f"Cleared {action_count} actions from execution history (session: {session_id})")
+                    info_print(f"Cleared {action_count} actions from in-memory history (session: {session_id})")
                 else:
                     self.session_history[session_id] = []
-                    info_print(f"Initialized empty execution history (session: {session_id})")
+                    info_print(f"Initialized empty in-memory history (session: {session_id})")
+            
+            # CRITICAL: Also clear database history to prevent cross-contamination in batch mode
+            # Without this, workflow validation reads old history from DB when in-memory is empty
+            if self.sqlite_logger:
+                try:
+                    import sqlite3
+                    with sqlite3.connect(str(self.sqlite_logger.db_path), timeout=30.0) as conn:
+                        cursor = conn.execute(
+                            "DELETE FROM agent_activities WHERE session_id = ?",
+                            (session_id,)
+                        )
+                        rows_deleted = cursor.rowcount
+                        conn.commit()
+                        info_print(f"Cleared {rows_deleted} database records for session: {session_id}")
+                except Exception as e:
+                    error_print(f"Failed to clear database history: {e}")
         else:
             with self.session_history_lock:
                 self.session_history = {}

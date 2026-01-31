@@ -53,54 +53,61 @@ def match_sequence_pattern(
     """
     Match an execution history against a required leading context pattern.
     **Supports both old and new graph formats transparently.**
-    
-    Args:
-        execution_history: List of action names executed so far
-        required_pattern: Pattern in old format (list) or new format (dict with 'context')
-        
-    Returns:
-        (is_match, error_message) tuple
     """
-    
+
+    # ================= DEBUG OUTPUT =================
+    print("History was:")
+    print(list(execution_history))
+    print("-" * 40)
+    # ===============================================
+
     # Normalize the pattern to standard format (strips metadata if present)
     normalized_pattern = normalize_pattern(required_pattern)
-    
+
     if not normalized_pattern:
         return True, ""
-    
+
     if not execution_history and normalized_pattern:
         first_action = normalized_pattern[0].get('action_name', '')
         return False, f"History is empty, but pattern requires {first_action!r}"
-    
+
     pattern_idx = 0
     history_idx = 0
-    
+
     while pattern_idx < len(normalized_pattern) and history_idx < len(execution_history):
         pattern_entry = normalized_pattern[pattern_idx]
         expected_action = pattern_entry.get("action_name")
         repeat_allowed = pattern_entry.get("repeat", False)
-        
+
         current_action = execution_history[history_idx]
 
         if current_action == expected_action:
             history_idx += 1
-            
+
             # If repeat is allowed, consume all consecutive matching actions
             if repeat_allowed:
-                while history_idx < len(execution_history) and execution_history[history_idx] == expected_action:
+                while (
+                    history_idx < len(execution_history)
+                    and execution_history[history_idx] == expected_action
+                ):
                     history_idx += 1
-            
+
             # Move to next pattern entry
             pattern_idx += 1
         else:
-            return False, f"Pattern mismatch at index {history_idx}: Expected {expected_action!r} but got {current_action!r}"
-    
+            return False, (
+                f"Pattern mismatch at index {history_idx}: "
+                f"Expected {expected_action!r} but got {current_action!r}"
+            )
+
     # Check if we matched the whole pattern
     if pattern_idx == len(normalized_pattern):
         return True, ""
     else:
         expected_action = normalized_pattern[pattern_idx].get("action_name")
-        return False, f"History ended, but pattern still required action: {expected_action!r}"
+        return False, (
+            f"History ended, but pattern still required action: {expected_action!r}"
+        )
 
 
 def validate_workflow(
